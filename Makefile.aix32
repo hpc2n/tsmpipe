@@ -1,0 +1,16 @@
+TSMAPIDIR=/usr/tivoli/tsm/client/api/bin/sample
+TSMLIB=-lApiDS
+CC=/usr/vac/bin/xlc
+CFLAGS=-q32 -g -O -I$(TSMAPIDIR)
+LDFLAGS=
+
+FILES=tsmpipe.c
+
+
+all:		tsmpipe
+
+tsmpipe:	$(FILES:.c=.o)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(FILES:.c=.o) $(TSMLIB) -lm
+
+clean:
+	rm tsmpipe *.o
