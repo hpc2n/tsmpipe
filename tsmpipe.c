@@ -21,7 +21,7 @@ SOFTWARE.
 */
 
 static const char rcsid[] = /*Add RCS version string to binary */
-        "$Id$";
+        "$Id: tsmpipe.c,v 1.1 2006/11/01 14:13:05 nikke Exp nikke $";
 
 /* Enable Large File Support stuff */
 #define _FILE_OFFSET_BITS 64
@@ -82,7 +82,7 @@ ssize_t read_full(int fd, void *buf, size_t count) {
     while(count) {
         ssize_t len;
 
-        len = read(fd, buf, count);
+        len = read(fd, buf+done, count);
         if(len == 0) {
             break;
         }
@@ -538,7 +538,7 @@ int copy_env(const char *from, const char *to) {
 
 void usage(void) {
     fprintf(stderr,
-    "tsmpipe $Revision$, usage:\n"
+    "tsmpipe $Revision: 1.1 $, usage:\n"
     "tsmpipe [-A|-B] [-c|-x|-d] -s fsname -f filepath [-l len]\n"
     "   -A and -B are mutually exclusive:\n"
     "       -A  Use Archive objects\n"
