@@ -1,5 +1,5 @@
 /*
-    Copyright (c) 2006 HPC2N, Umeå University, Sweden
+    Copyright (c) 2006,2007 HPC2N, Umeå University, Sweden
 
     Permission is hereby granted, free of charge, to any person obtaining a
 copy of this software and associated documentation files (the "Software"), to
@@ -21,7 +21,7 @@ SOFTWARE.
 */
 
 static const char rcsid[] = /*Add RCS version string to binary */
-        "$Id: tsmpipe.c,v 1.1 2006/11/01 14:13:05 nikke Exp nikke $";
+        "$Id: tsmpipe.c,v 1.2 2007/01/16 11:59:07 nikke Exp $";
 
 /* Enable Large File Support stuff */
 #define _FILE_OFFSET_BITS 64
@@ -56,8 +56,9 @@ static const char rcsid[] = /*Add RCS version string to binary */
  * For a default tuned TSM client on Linux, BUFLEN should thus be 32*1024*2-4.
  */
 
-/* We have 512kB tcpbuff */
+/* We (HPC2N) have 512kB tcpbuff */
 #define BUFLEN (64*1024-4)
+
 
 off_t atooff(const char *s)
 {
@@ -94,6 +95,31 @@ ssize_t read_full(int fd, void *buf, size_t count) {
                 if(done == 0) {
                     done = -1;
                 }
+                break;
+            }
+        }
+        count -= len;
+        done += len;
+    }
+
+    return(done);
+}
+
+
+ssize_t write_full(int fd, const void *buf, size_t count)
+{
+    ssize_t done=0;
+
+    while(count) {
+        ssize_t len;
+
+        len = write(fd, buf+done, count);
+        if(len < 0) {
+            if(errno == EINTR) {
+                continue;
+            }
+            else {
+                done = -1;
                 break;
             }
         }
@@ -265,7 +291,7 @@ int tsm_sendfile(dsUint32_t sesshandle, char *fsname, char *filename,
 
     buffer = malloc(BUFLEN);
     if(!buffer) {
-        perror("malloc");
+        perror("tsmpipe: malloc");
         return 0;
     }
 
@@ -331,7 +357,7 @@ int tsm_sendfile(dsUint32_t sesshandle, char *fsname, char *filename,
         nbytes = read_full(STDIN_FILENO, buffer, BUFLEN);
 
         if(nbytes < 0) {
-            perror("read");
+            perror("tsmpipe: read");
             return 0;
         }
         else if(nbytes == 0) {
@@ -370,9 +396,18 @@ int tsm_sendfile(dsUint32_t sesshandle, char *fsname, char *filename,
     return 1;
 }
 
+/* Typedef for the callback used in tsm_queryfile() */
+/* Returns: -1 upon error condition, application should exit.
+ *           0 if tsm_queryfile() should skip processing the remaining
+ *             matches.
+ *           1 otherwise.
+ */
+typedef int (*tsm_query_callback)(dsmQueryType, DataBlk *, void *);
 
-int tsm_deletefile(dsUint32_t sesshandle, char *fsname, char *filename, 
-                   char *description, dsmSendType sendtype, char verbose)
+
+int tsm_queryfile(dsUint32_t sesshandle, dsmObjName *objName, 
+                   char *description, dsmSendType sendtype, char verbose,
+                   tsm_query_callback usercb, void * userdata)
 {
     dsmQueryType        qType;
     qryArchiveData      qaData;
@@ -381,29 +416,20 @@ int tsm_deletefile(dsUint32_t sesshandle, char *fsname, char *filename,
     qryRespBackupData   qbResp;
     dsmQueryBuff        *qDataP;
     DataBlk             qResp;
-    dsmObjName          objName;
     dsInt16_t           rc;
-    dsUint16_t          reason=0;
-    unsigned int        numfound;
-    delArch             daInfo;
-    delBack             dbInfo;
-    dsmDelInfo          *dInfoP;
-    dsmDelType          dType;
 
     qResp.stVersion = DataBlkVersion;
 
-    tsm_name2obj(fsname, filename, &objName);
-
-    if(verbose > 0) {
-        fprintf(stderr, "tsmpipe: Deleting file %s%s%s\n",
-                objName.fs, objName.hl, objName.ll);
+    if(verbose > 1) {
+        fprintf(stderr, "tsmpipe: Query file %s%s%s\n",
+                objName->fs, objName->hl, objName->ll);
     }
 
     if(sendtype == stArchiveMountWait || sendtype == stArchive) {
         qType               = qtArchive;
 
         qaData.stVersion    = qryArchiveDataVersion;
-        qaData.objName      = &objName;
+        qaData.objName      = objName;
         qaData.owner        = "";
         qaData.insDateLowerBound.year = DATE_MINUS_INFINITE;
         qaData.insDateUpperBound.year = DATE_PLUS_INFINITE;
@@ -422,7 +448,7 @@ int tsm_deletefile(dsUint32_t sesshandle, char *fsname, char *filename,
         qType               = qtBackup;
 
         qbData.stVersion    = qryBackupDataVersion;
-        qbData.objName      = &objName;
+        qbData.objName      = objName;
         qbData.owner        = "";
         qbData.objState     = DSM_ACTIVE;
         qbData.pitDate.year = DATE_MINUS_INFINITE;
@@ -441,12 +467,38 @@ int tsm_deletefile(dsUint32_t sesshandle, char *fsname, char *filename,
         return(0);
     }
 
-    /* We only want one match, so just skip the rest if the user got clever
-     * and entered a wildcard mathcing many files */
-    numfound = 0;
+    /* Loop and apply our callback to the result */
     while((rc = dsmGetNextQObj(sesshandle, &qResp)) == DSM_RC_MORE_DATA) {
-        numfound++;
-        if(numfound > 1) {
+        int cbret;
+
+        if(verbose > 1) {
+            dsmObjName *rObjName;
+            
+            if(qType == qtArchive) {
+                qryRespArchiveData *qr = (void *) qResp.bufferPtr;
+                rObjName = &(qr->objName);
+            }
+            else if(qType == qtBackup) {
+                qryRespBackupData *qr = (void *) qResp.bufferPtr;
+                rObjName = &(qr->objName);
+            }
+            else {
+                fprintf(stderr,
+                        "tsm_queryfile: Internal error: Unknown qType %d\n",
+                        qType);
+                return 0;
+            }
+            fprintf(stderr, "tsmpipe: Matched file %s%s%s\n",
+                    rObjName->fs, rObjName->hl, rObjName->ll);
+        }
+        if(usercb == NULL) {
+            continue;
+        }
+        cbret = usercb(qType, &qResp, userdata);
+        if (cbret < 0) {
+            return 0;
+        }
+        else if(cbret == 0) {
             break;
         }
     }
@@ -462,12 +514,76 @@ int tsm_deletefile(dsUint32_t sesshandle, char *fsname, char *filename,
         return(0);
     }
 
-    if(numfound == 0) {
-        fprintf(stderr, "tsmpipe: FAILED: The file specification did not match any files.\n");
-        return(0);
+    return 1;
+}
+
+struct matchone_cb_data {
+    int             numfound;
+    dsStruct64_t    objId;
+    dsUint32_t      copyGroup;
+};
+
+int tsm_matchone_cb(dsmQueryType qType, DataBlk *qResp, void * userdata)
+{
+    struct matchone_cb_data *cbdata = userdata;
+
+    cbdata->numfound++;
+
+    if(qType == qtArchive) {
+        qryRespArchiveData *qr = (void *) qResp->bufferPtr;
+        
+        cbdata->objId = qr->objId;
     }
-    else if(numfound > 1) {
+    else if(qType == qtBackup) {
+        qryRespBackupData *qr = (void *) qResp->bufferPtr;
+        
+        cbdata->objId       = qr->objId;
+        cbdata->copyGroup   = qr->copyGroup;
+    }
+    else {
+        fprintf(stderr,
+                "tsm_matchone_cb: Internal error: Unknown qType %d\n",
+                qType);
+        return -1;
+    }
+
+    if(cbdata->numfound > 1) {
         fprintf(stderr, "tsmpipe: FAILED: The file specification matched multiple files.\n");
+        return -1;
+    }
+
+    return 1;
+}
+
+
+int tsm_deletefile(dsUint32_t sesshandle, char *fsname, char *filename, 
+                   char *description, dsmSendType sendtype, char verbose)
+{
+    dsInt16_t           rc;
+    dsUint16_t          reason=0;
+    dsmDelInfo          *dInfoP;
+    dsmDelType          dType;
+    struct matchone_cb_data  cbdata;
+    delArch             daInfo;
+    delBack             dbInfo;
+    dsmObjName          objName;
+
+    tsm_name2obj(fsname, filename, &objName);
+
+    if(verbose > 0) {
+        fprintf(stderr, "tsmpipe: Deleting file %s%s%s\n",
+                objName.fs, objName.hl, objName.ll);
+    }
+
+    cbdata.numfound = 0;
+    if(!tsm_queryfile(sesshandle, &objName, description, sendtype, 
+                      verbose, tsm_matchone_cb, &cbdata))
+    {
+        return 0;
+    }
+
+    if(cbdata.numfound == 0) {
+        fprintf(stderr, "tsmpipe: FAILED: The file specification did not match any file.\n");
         return(0);
     }
 
@@ -475,7 +591,7 @@ int tsm_deletefile(dsUint32_t sesshandle, char *fsname, char *filename,
         dType = dtArchive;
 
         daInfo.stVersion    = delArchVersion;
-        daInfo.objId        = qaResp.objId;
+        daInfo.objId        = cbdata.objId;
 
         dInfoP = (dsmDelInfo *) &daInfo;
     }
@@ -484,11 +600,11 @@ int tsm_deletefile(dsUint32_t sesshandle, char *fsname, char *filename,
 
         dbInfo.stVersion    = delBackVersion;
         dbInfo.objNameP     = &objName;
-        dbInfo.copyGroup    = qbResp.copyGroup;
+        dbInfo.copyGroup    = cbdata.copyGroup;
 
         dInfoP = (dsmDelInfo *) &dbInfo;
     }
-    
+
     rc = dsmBeginTxn(sesshandle);
     if(rc != DSM_RC_OK) {
         tsm_printerr(sesshandle, rc, "dsmBeginTxn failed");
@@ -516,6 +632,154 @@ int tsm_deletefile(dsUint32_t sesshandle, char *fsname, char *filename,
     return(1);
 }
 
+
+int tsm_restorefile(dsUint32_t sesshandle, char *fsname, char *filename, 
+                   char *description, dsmSendType sendtype, char verbose)
+{
+    dsInt16_t               rc;
+    struct matchone_cb_data cbdata;
+    dsmGetList              getList;
+    dsmGetType              getType;
+    DataBlk                 dataBlk;
+    dsmObjName              objName;
+
+    tsm_name2obj(fsname, filename, &objName);
+
+    if(verbose > 0) {
+        fprintf(stderr, "tsmpipe: Restoring file %s%s%s\n",
+                objName.fs, objName.hl, objName.ll);
+    }
+
+    cbdata.numfound = 0;
+    if(!tsm_queryfile(sesshandle, &objName, description, sendtype, 
+                      verbose, tsm_matchone_cb, &cbdata))
+    {
+        return 0;
+    }
+
+    if(cbdata.numfound == 0) {
+        fprintf(stderr, "tsmpipe: FAILED: The file specification did not match any file.\n");
+        return(0);
+    }
+
+    getList.stVersion = dsmGetListVersion;
+    getList.numObjId = 1;
+    getList.objId = &cbdata.objId;
+    getList.partialObjData = NULL;
+
+    if(sendtype == stArchiveMountWait || sendtype == stArchive) {
+        getType = gtArchive;
+    }
+    else {
+        getType = gtBackup;
+    }
+
+    rc = dsmBeginGetData(sesshandle, bTrue, getType, &getList);
+    if(rc != DSM_RC_OK) {
+        tsm_printerr(sesshandle, rc, "dsmBeginGetData failed");
+        return 0;
+    }
+
+    dataBlk.stVersion = DataBlkVersion;
+    dataBlk.bufferPtr = malloc(BUFLEN);
+    if(!dataBlk.bufferPtr) {
+        perror("tsmpipe: malloc");
+        return 0;
+    }
+    dataBlk.bufferLen = BUFLEN;
+    dataBlk.numBytes = 0;
+    rc = dsmGetObj(sesshandle, &cbdata.objId, &dataBlk);
+    while(rc == DSM_RC_MORE_DATA) {
+        if(write_full(STDOUT_FILENO, dataBlk.bufferPtr, dataBlk.numBytes) < 0) {
+            perror("tsmpipe: write");
+            return 0;
+        }
+        dataBlk.numBytes = 0;
+        rc = dsmGetData(sesshandle, &dataBlk);
+    }
+    if(rc != DSM_RC_FINISHED) {
+        tsm_printerr(sesshandle, rc, "dsmGetObj/dsmGetData failed");
+        return 0;
+    }
+    if(write_full(STDOUT_FILENO, dataBlk.bufferPtr, dataBlk.numBytes) < 0) {
+        perror("tsmpipe: write");
+        return 0;
+    }
+
+    rc = dsmEndGetObj(sesshandle);
+    if(rc != DSM_RC_OK) {
+        tsm_printerr(sesshandle, rc, "dsmEndGetObj failed");
+        return 0;
+    }
+
+    rc = dsmEndGetData(sesshandle);
+    if(rc != DSM_RC_OK) {
+        tsm_printerr(sesshandle, rc, "dsmEndGetData failed");
+        return 0;
+    }
+
+    return 1;
+}
+
+int tsm_listfile_cb(dsmQueryType qType, DataBlk *qResp, void * userdata)
+{
+    unsigned long long   filesize;
+    dsStruct64_t        *rSizeEst;
+    dsmObjName          *rObjName;
+
+    if(userdata != NULL ) {
+        fprintf(stderr, "tsm_listfile_cb: Internal error: userdate != NULL");
+        return -1;
+    }
+
+    if(qType == qtArchive) {
+        qryRespArchiveData *qr = (void *) qResp->bufferPtr;
+        
+        rSizeEst = &qr->sizeEstimate;
+        rObjName = &qr->objName;
+    }
+    else if(qType == qtBackup) {
+        qryRespBackupData *qr = (void *) qResp->bufferPtr;
+
+        rSizeEst = &qr->sizeEstimate;
+        rObjName = &qr->objName;
+    }
+    else {
+        fprintf(stderr,
+                "tsm_listfile_cb: Internal error: Unknown qType %d\n", qType);
+        return -1;
+    }
+
+    filesize = rSizeEst->hi;
+    filesize <<= 32;
+    filesize |= rSizeEst->lo;
+    printf("%lld %s%s%s\n", filesize, rObjName->fs, rObjName->hl, rObjName->ll);
+
+    return 1;
+}
+
+
+int tsm_listfile(dsUint32_t sesshandle, char *fsname, char *filename, 
+                   char *description, dsmSendType sendtype, char verbose)
+{
+    dsmObjName  objName;
+
+    tsm_name2obj(fsname, filename, &objName);
+
+    if(verbose > 0) {
+        fprintf(stderr, "tsmpipe: Listing file(s) %s%s%s\n",
+                objName.fs, objName.hl, objName.ll);
+    }
+
+    if(!tsm_queryfile(sesshandle, &objName, description, sendtype, 
+                      verbose, tsm_listfile_cb, NULL))
+    {
+        return 0;
+    }
+
+    return 1;
+}
+
 int copy_env(const char *from, const char *to) {
     char *e;
     char n[PATH_MAX+1];
@@ -528,7 +792,7 @@ int copy_env(const char *from, const char *to) {
     n[PATH_MAX] = '\0';
     snprintf(n, PATH_MAX, "%s=%s", to, e);
     if(putenv(strdup(n))) {
-        perror("Setting up environment");
+        perror("tsmpipe: Setting up environment");
         return(0);
     }
 
@@ -538,15 +802,16 @@ int copy_env(const char *from, const char *to) {
 
 void usage(void) {
     fprintf(stderr,
-    "tsmpipe $Revision: 1.1 $, usage:\n"
-    "tsmpipe [-A|-B] [-c|-x|-d] -s fsname -f filepath [-l len]\n"
+    "tsmpipe $Revision: 1.2 $, usage:\n"
+    "tsmpipe [-A|-B] [-c|-x|-d|-t] -s fsname -f filepath [-l len]\n"
     "   -A and -B are mutually exclusive:\n"
     "       -A  Use Archive objects\n"
     "       -B  Use Backup objects\n"
-    "   -c, -x and -d are mutually exclusive:\n"
-    "       -c  Create: Read from stdin and store in TSM\n"
+    "   -c, -x, -d and -t are mutually exclusive:\n"
+    "       -c  Create:  Read from stdin and store in TSM\n"
     "       -x  eXtract: Recall from TSM and write to stdout\n"
-    "       -d  Delete: Delete object from TSM\n"
+    "       -d  Delete:  Delete object from TSM\n"
+    "       -t  lisT:    Print filelist to stdout\n"
     "   -s and -f are required arguments:\n"
     "       -s fsname   Name of filesystem in TSM\n"
     "       -f filepath Path to file within filesystem in TSM\n"
@@ -564,13 +829,14 @@ int main(int argc, char *argv[]) {
     extern int  optind, optopt;
     extern char *optarg;
     char        archmode=0, backmode=0, create=0, xtract=0, delete=0, verbose=0;
+    char        list=0;
     char        *space=NULL, *filename=NULL, *lenstr=NULL, *desc=NULL;
     char        *options=NULL;
     off_t       length;
     dsUint32_t  sesshandle;
     dsmSendType sendtype;
 
-    while ((c = getopt(argc, argv, "hABcxdvs:f:l:D:O:")) != -1) {
+    while ((c = getopt(argc, argv, "hABcxdtvs:f:l:D:O:")) != -1) {
         switch(c) {
             case 'h':
                 usage();
@@ -589,6 +855,9 @@ int main(int argc, char *argv[]) {
                 break;
             case 'd':
                 delete = 1;
+                break;
+            case 't':
+                list = 1;
                 break;
             case 'v':
                 verbose++;
@@ -621,8 +890,8 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "tsmpipe: ERROR: Must give one of -A or -B\n");
         exit(1);
     }
-    if(create+xtract+delete != 1) {
-        fprintf(stderr, "tsmpipe: ERROR: Must give on of -c, -x or -d\n");
+    if(create+xtract+delete+list != 1) {
+        fprintf(stderr, "tsmpipe: ERROR: Must give one of -c, -x, -d or -t\n");
         exit(1);
     }
     if(!space) {
@@ -702,8 +971,19 @@ int main(int argc, char *argv[]) {
     }
 
     if(xtract) {
-        fprintf(stderr, "tsmpipe: ERROR: -x not implemented yet\n");
-        exit(8);
+        if(!tsm_restorefile(sesshandle, space, filename, desc, sendtype, verbose))
+        {
+            dsmTerminate(sesshandle);
+            exit(8);
+        }
+    }
+
+    if(list) {
+        if(!tsm_listfile(sesshandle, space, filename, desc, sendtype, verbose))
+        {
+            dsmTerminate(sesshandle);
+            exit(9);
+        }
     }
 
     if(verbose > 0) {
