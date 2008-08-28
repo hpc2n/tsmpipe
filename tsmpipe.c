@@ -21,7 +21,7 @@ SOFTWARE.
 */
 
 static const char rcsid[] = /*Add RCS version string to binary */
-        "$Id: tsmpipe.c,v 1.2 2007/01/16 11:59:07 nikke Exp $";
+        "$Id: tsmpipe.c,v 1.3 2007/08/03 08:39:53 nikke Exp $";
 
 /* Enable Large File Support stuff */
 #define _FILE_OFFSET_BITS 64
@@ -405,9 +405,9 @@ int tsm_sendfile(dsUint32_t sesshandle, char *fsname, char *filename,
 typedef int (*tsm_query_callback)(dsmQueryType, DataBlk *, void *);
 
 
-int tsm_queryfile(dsUint32_t sesshandle, dsmObjName *objName, 
-                   char *description, dsmSendType sendtype, char verbose,
-                   tsm_query_callback usercb, void * userdata)
+dsInt16_t tsm_queryfile(dsUint32_t sesshandle, dsmObjName *objName, 
+                        char *description, dsmSendType sendtype, char verbose,
+                        tsm_query_callback usercb, void * userdata)
 {
     dsmQueryType        qType;
     qryArchiveData      qaData;
@@ -464,7 +464,7 @@ int tsm_queryfile(dsUint32_t sesshandle, dsmObjName *objName,
     rc = dsmBeginQuery(sesshandle, qType, qDataP);
     if(rc != DSM_RC_OK) {
         tsm_printerr(sesshandle, rc, "dsmBeginQuery failed");
-        return(0);
+        return rc;
     }
 
     /* Loop and apply our callback to the result */
@@ -486,7 +486,7 @@ int tsm_queryfile(dsUint32_t sesshandle, dsmObjName *objName,
                 fprintf(stderr,
                         "tsm_queryfile: Internal error: Unknown qType %d\n",
                         qType);
-                return 0;
+                return DSM_RC_UNKNOWN_ERROR;
             }
             fprintf(stderr, "tsmpipe: Matched file %s%s%s\n",
                     rObjName->fs, rObjName->hl, rObjName->ll);
@@ -496,7 +496,7 @@ int tsm_queryfile(dsUint32_t sesshandle, dsmObjName *objName,
         }
         cbret = usercb(qType, &qResp, userdata);
         if (cbret < 0) {
-            return 0;
+            return DSM_RC_UNKNOWN_ERROR;
         }
         else if(cbret == 0) {
             break;
@@ -505,16 +505,16 @@ int tsm_queryfile(dsUint32_t sesshandle, dsmObjName *objName,
 
     if(rc != DSM_RC_FINISHED && rc != DSM_RC_MORE_DATA) {
         tsm_printerr(sesshandle, rc, "dsmGetNextObj failed");
-        return(0);
+        return rc;
     }
 
     rc = dsmEndQuery(sesshandle);
     if(rc != DSM_RC_OK) {
         tsm_printerr(sesshandle, rc, "dsmEndQuery failed");
-        return(0);
+        return rc;
     }
 
-    return 1;
+    return DSM_RC_OK;
 }
 
 struct matchone_cb_data {
@@ -576,9 +576,9 @@ int tsm_deletefile(dsUint32_t sesshandle, char *fsname, char *filename,
     }
 
     cbdata.numfound = 0;
-    if(!tsm_queryfile(sesshandle, &objName, description, sendtype, 
-                      verbose, tsm_matchone_cb, &cbdata))
-    {
+    rc = tsm_queryfile(sesshandle, &objName, description, sendtype, 
+                       verbose, tsm_matchone_cb, &cbdata);
+    if(rc != DSM_RC_OK) {
         return 0;
     }
 
@@ -651,9 +651,10 @@ int tsm_restorefile(dsUint32_t sesshandle, char *fsname, char *filename,
     }
 
     cbdata.numfound = 0;
-    if(!tsm_queryfile(sesshandle, &objName, description, sendtype, 
-                      verbose, tsm_matchone_cb, &cbdata))
-    {
+
+    rc = tsm_queryfile(sesshandle, &objName, description, sendtype, 
+                       verbose, tsm_matchone_cb, &cbdata);
+    if(rc != DSM_RC_OK) {
         return 0;
     }
 
@@ -762,6 +763,7 @@ int tsm_listfile_cb(dsmQueryType qType, DataBlk *qResp, void * userdata)
 int tsm_listfile(dsUint32_t sesshandle, char *fsname, char *filename, 
                    char *description, dsmSendType sendtype, char verbose)
 {
+    dsInt16_t   rc;
     dsmObjName  objName;
 
     tsm_name2obj(fsname, filename, &objName);
@@ -771,9 +773,9 @@ int tsm_listfile(dsUint32_t sesshandle, char *fsname, char *filename,
                 objName.fs, objName.hl, objName.ll);
     }
 
-    if(!tsm_queryfile(sesshandle, &objName, description, sendtype, 
-                      verbose, tsm_listfile_cb, NULL))
-    {
+    rc = tsm_queryfile(sesshandle, &objName, description, sendtype, 
+                       verbose, tsm_listfile_cb, NULL);
+    if(rc != DSM_RC_OK && rc != DSM_RC_ABORT_NO_MATCH) {
         return 0;
     }
 
@@ -802,7 +804,7 @@ int copy_env(const char *from, const char *to) {
 
 void usage(void) {
     fprintf(stderr,
-    "tsmpipe $Revision: 1.2 $, usage:\n"
+    "tsmpipe $Revision: 1.3 $, usage:\n"
     "tsmpipe [-A|-B] [-c|-x|-d|-t] -s fsname -f filepath [-l len]\n"
     "   -A and -B are mutually exclusive:\n"
     "       -A  Use Archive objects\n"
