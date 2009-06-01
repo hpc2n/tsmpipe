@@ -21,7 +21,7 @@ SOFTWARE.
 */
 
 static const char rcsid[] = /*Add RCS version string to binary */
-        "$Id: tsmpipe.c,v 1.3 2007/08/03 08:39:53 nikke Exp $";
+        "$Id: tsmpipe.c,v 1.4 2008/08/28 15:03:10 nikke Exp nikke $";
 
 /* Enable Large File Support stuff */
 #define _FILE_OFFSET_BITS 64
@@ -369,14 +369,14 @@ int tsm_sendfile(dsUint32_t sesshandle, char *fsname, char *filename,
         dataBlk.bufferPtr   = buffer;
 
         rc = dsmSendData(sesshandle, &dataBlk);
-        if(rc != DSM_RC_OK) {
+        if(rc != DSM_RC_OK && rc != DSM_RC_COMPRESS_GREW) {
             tsm_printerr(sesshandle, rc, "dsmSendData failed");
             return 0;
         }
     }
 
     rc = dsmEndSendObj(sesshandle);
-    if(rc != DSM_RC_OK) {
+    if(rc != DSM_RC_OK && rc != DSM_RC_COMPRESS_GREW) {
         tsm_printerr(sesshandle, rc, "dsmEndSendObj failed");
         return(0);
     }
@@ -804,7 +804,7 @@ int copy_env(const char *from, const char *to) {
 
 void usage(void) {
     fprintf(stderr,
-    "tsmpipe $Revision: 1.3 $, usage:\n"
+    "tsmpipe $Revision: 1.4 $, usage:\n"
     "tsmpipe [-A|-B] [-c|-x|-d|-t] -s fsname -f filepath [-l len]\n"
     "   -A and -B are mutually exclusive:\n"
     "       -A  Use Archive objects\n"
