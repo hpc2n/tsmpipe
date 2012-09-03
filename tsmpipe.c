@@ -21,7 +21,7 @@ SOFTWARE.
 */
 
 static const char rcsid[] = /*Add RCS version string to binary */
-        "$Id: tsmpipe.c,v 1.6 2010/02/15 07:41:26 nikke Exp nikke $";
+        "$Id: tsmpipe.c,v 1.7 2012/09/03 11:04:01 nikke Exp $";
 
 /* Enable Large File Support stuff */
 #define _FILE_OFFSET_BITS 64
@@ -39,6 +39,13 @@ static const char rcsid[] = /*Add RCS version string to binary */
 #include "dsmrc.h"
 #include "dsmapitd.h"
 #include "dsmapifp.h"
+
+typedef enum
+{
+    listmode_unknown = 0,
+    listmode_fsize,
+    listmode_volser
+} tsmpipe_listmode_t;
 
 /* 
  * The recommended buffer size is n*TCPBUFFLEN - 4 bytes.
@@ -727,9 +734,18 @@ int tsm_listfile_cb(dsmQueryType qType, DataBlk *qResp, void * userdata)
     unsigned long long   filesize;
     dsStruct64_t        *rSizeEst;
     dsmObjName          *rObjName;
+    dsUint160_t         *rOrder;
+    tsmpipe_listmode_t  *listmode;
 
-    if(userdata != NULL ) {
-        fprintf(stderr, "tsm_listfile_cb: Internal error: userdate != NULL");
+    if(userdata == NULL ) {
+        fprintf(stderr, "tsm_listfile_cb: Internal error: userdata == NULL");
+        return -1;
+    }
+
+    listmode = userdata;
+
+    if(*listmode == listmode_unknown) {
+        fprintf(stderr, "tsm_listfile_cb: Internal error: listmode == unknown");
         return -1;
     }
 
@@ -738,12 +754,14 @@ int tsm_listfile_cb(dsmQueryType qType, DataBlk *qResp, void * userdata)
         
         rSizeEst = &qr->sizeEstimate;
         rObjName = &qr->objName;
+        rOrder   = &qr->restoreOrderExt;
     }
     else if(qType == qtBackup) {
         qryRespBackupData *qr = (void *) qResp->bufferPtr;
 
         rSizeEst = &qr->sizeEstimate;
         rObjName = &qr->objName;
+        rOrder   = &qr->restoreOrderExt;
     }
     else {
         fprintf(stderr,
@@ -751,17 +769,30 @@ int tsm_listfile_cb(dsmQueryType qType, DataBlk *qResp, void * userdata)
         return -1;
     }
 
-    filesize = rSizeEst->hi;
-    filesize <<= 32;
-    filesize |= rSizeEst->lo;
-    printf("%lld %s%s%s\n", filesize, rObjName->fs, rObjName->hl, rObjName->ll);
+    if(*listmode == listmode_fsize) {
+        filesize = rSizeEst->hi;
+        filesize <<= 32;
+        filesize |= rSizeEst->lo;
+        printf("%lld %s%s%s\n", 
+                filesize, rObjName->fs, rObjName->hl, rObjName->ll);
+    }
+    else if(*listmode == listmode_volser) {
+        printf("%u %s%s%s\n", 
+                rOrder->top, rObjName->fs, rObjName->hl, rObjName->ll);
+    }
+    else {
+        fprintf(stderr, "tsm_listfile_cb: Internal error: listmode %d unknown",
+                *listmode);
+        return -1;
+    }
 
     return 1;
 }
 
 
 int tsm_listfile(dsUint32_t sesshandle, char *fsname, char *filename, 
-                   char *description, dsmSendType sendtype, char verbose)
+                   char *description, dsmSendType sendtype, char verbose,
+                   tsmpipe_listmode_t listmode)
 {
     dsInt16_t   rc;
     dsmObjName  objName;
@@ -774,7 +805,7 @@ int tsm_listfile(dsUint32_t sesshandle, char *fsname, char *filename,
     }
 
     rc = tsm_queryfile(sesshandle, &objName, description, sendtype, 
-                       verbose, tsm_listfile_cb, NULL);
+                       verbose, tsm_listfile_cb, &listmode);
     if(rc != DSM_RC_OK && rc != DSM_RC_ABORT_NO_MATCH) {
         return 0;
     }
@@ -804,7 +835,7 @@ int copy_env(const char *from, const char *to) {
 
 void usage(void) {
     fprintf(stderr,
-    "tsmpipe $Revision: 1.6 $, usage:\n"
+    "tsmpipe $Revision: 1.7 $, usage:\n"
     "tsmpipe [-A|-B] [-c|-x|-d|-t] -s fsname -f filepath [-l len]\n"
     "   -A and -B are mutually exclusive:\n"
     "       -A  Use Archive objects\n"
@@ -813,7 +844,8 @@ void usage(void) {
     "       -c  Create:  Read from stdin and store in TSM\n"
     "       -x  eXtract: Recall from TSM and write to stdout\n"
     "       -d  Delete:  Delete object from TSM\n"
-    "       -t  lisT:    Print filelist to stdout\n"
+    "       -t  lisT:    Print filelist with filesizes to stdout\n"
+    "       -T  lisT:    Print filelist with volser ids to stdout\n"
     "   -s and -f are required arguments:\n"
     "       -s fsname   Name of filesystem in TSM\n"
     "       -f filepath Path to file within filesystem in TSM\n"
@@ -837,8 +869,9 @@ int main(int argc, char *argv[]) {
     off_t       length;
     dsUint32_t  sesshandle;
     dsmSendType sendtype;
+    tsmpipe_listmode_t listmode=listmode_unknown;
 
-    while ((c = getopt(argc, argv, "hABcxdtvs:f:l:D:O:")) != -1) {
+    while ((c = getopt(argc, argv, "hABcxdtTvs:f:l:D:O:")) != -1) {
         switch(c) {
             case 'h':
                 usage();
@@ -860,6 +893,11 @@ int main(int argc, char *argv[]) {
                 break;
             case 't':
                 list = 1;
+                listmode = listmode_fsize;
+                break;
+            case 'T':
+                list = 1;
+                listmode = listmode_volser;
                 break;
             case 'v':
                 verbose++;
@@ -981,7 +1019,7 @@ int main(int argc, char *argv[]) {
     }
 
     if(list) {
-        if(!tsm_listfile(sesshandle, space, filename, desc, sendtype, verbose))
+        if(!tsm_listfile(sesshandle, space, filename, desc, sendtype, verbose, listmode))
         {
             dsmTerminate(sesshandle);
             exit(9);
