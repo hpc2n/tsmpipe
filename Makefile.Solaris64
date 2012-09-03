@@ -1,0 +1,16 @@
+TSMAPIDIR=/opt/tivoli/tsm/client/api/bin64/sample
+TSMLIB=-lApiDS64
+CC=cc
+CFLAGS=-errwarn=%all -m64 -g -I$(TSMAPIDIR)
+LDFLAGS=
+
+FILES=tsmpipe.c
+
+
+all:		tsmpipe
+
+tsmpipe:	$(FILES:.c=.o)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(FILES:.c=.o) $(TSMLIB) -lm
+
+clean:
+	rm tsmpipe *.o
