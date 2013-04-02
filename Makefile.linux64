@@ -1,8 +1,8 @@
-TSMAPIDIR=/opt/tivoli/tsm/client/api/bin64/sample
+TSMAPIDIR=/opt/tivoli/tsm/client/api/bin64
 TSMLIB=-lApiTSM64
 CC=gcc
-CFLAGS=-g -W -Wall -O -I$(TSMAPIDIR)
-LDFLAGS=
+CFLAGS=-g -W -Wall -O -I$(TSMAPIDIR)/sample
+LDFLAGS=-L$(TSMAPIDIR) -Wl,-rpath $(TSMAPIDIR)
 
 FILES=tsmpipe.c
 
