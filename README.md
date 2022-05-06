@@ -60,5 +60,6 @@ tsmpipe [-A|-B] [-c|-x|-d|-t] -s fsname -f filepath [-l len]
 ## Other implemenations
 
 * `adsmpipe` is the original IBM implementation
-* https://dev.leenooks.net/deon/tsmpipe is a fork based on RCS version 1.6,
+   * I was recently informed that it originates from an IBM RedBook. Notably https://github.com/jmkeyes/adsmpipe uses that source.
+* https://dev.leenooks.net/deon/tsmpipe is a fork based on tsmpipe RCS version 1.6,
   approx https://github.com/hpc2n/tsmpipe/commit/116624fa8f8197d7c9ba41ddf5143642619150f5
